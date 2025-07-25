@@ -1,0 +1,530 @@
+
+<!DOCTYPE html>
+
+<html lang="es">
+<head>
+<meta charset="utf-8"/>
+<title>Geovisor RUAA</title>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<link href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com"></script>
+<script crossorigin="anonymous" src="https://kit.fontawesome.com/a2e0e6e6c2.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+    #map { height: 70vh; position: relative; z-index: 10; }
+    #filters { display: flex; gap: 10px; margin: 10px; flex-wrap: wrap; }
+    .legend {
+      background: white;
+      padding: 8px;
+      line-height: 18px;
+      color: #333;
+      border-radius: 5px;
+      box-shadow: 0 0 5px rgba(0,0,0,0.3);
+    }
+    .legend i {
+      width: 18px;
+      height: 18px;
+      float: left;
+      margin-right: 8px;
+      opacity: 0.7;
+      display: inline-block;
+    }
+  </style>
+</head>
+<body class="bg-gray-100 text-gray-800">
+<header class="bg-white shadow-md p-4 mb-4">
+  <h1 class="text-2xl md:text-3xl font-bold text-center text-blue-800">Geovisor de Autorizaciones de Uso/Aprovechamiento del Agua</h1>
+</header>
+<div class="flex flex-col md:flex-row">
+<div class="w-full md:w-80 bg-white shadow-xl p-6 space-y-4 rounded-2xl">
+<h2 class="text-xl font-bold text-center mb-2">Filtro para AUA del Agua</h2>
+<select class="w-full border rounded p-2 mb-2" id="provinciaFilter"><option value="">-- Provincia --</option></select>
+<select class="w-full border rounded p-2 mb-2" id="cantonFilter"><option value="">-- Cantón --</option></select>
+<select class="w-full border rounded p-2" id="usoFilter"><option value="">-- Uso del Agua --</option></select>
+<button class="text-xs bg-gray-200 hover:bg-gray-300 text-gray-800 px-2 py-1 rounded" id="resetFiltersBtn">
+      Limpiar filtros
+    </button>
+</div>
+<div class="flex-1">
+<div class="w-full h-[70vh]" id="map"></div>
+</div>
+</div>
+<div class="max-w-6xl mx-auto p-6 mt-10 bg-white rounded-2xl shadow-xl">
+<h2 class="text-xl font-bold mb-4 text-center">Distribución de Usos del Agua</h2>
+<canvas class="w-full h-96" id="usoAguaChart"></canvas>
+</div>
+<div class="max-w-6xl mx-auto p-6 mt-10 bg-white rounded-2xl shadow-xl">
+<h2 class="text-xl font-bold mb-4 text-center">Registros Filtrados</h2>
+<div class="text-right mb-2">
+<button class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded shadow" id="exportCsvBtn">
+    📤 Exportar a CSV
+  </button>
+</div>
+<div class="overflow-auto max-h-[400px]">
+<table class="min-w-full text-sm text-left border border-gray-300" id="tablaResultados">
+<thead class="bg-gray-200 sticky top-0">
+<tr>
+<th class="px-2 py-1">Provincia</th>
+<th class="px-2 py-1">Cantón</th>
+<th class="px-2 py-1">Uso</th>
+<th class="px-2 py-1">Volumen</th>
+<th class="px-2 py-1">Caudal</th>
+</tr>
+</thead>
+<tbody class="divide-y odd:bg-white even:bg-gray-50" id="tablaBody"></tbody>
+</table>
+</div>
+</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const API_URL = "https://ngwddojhwmvillngwmip.supabase.co/rest/v1/rua4326?select=*&limit=10000";
+const API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5nd2Rkb2pod212aWxsbmd3bWlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTAyOTMwNzEsImV4cCI6MjA2NTg2OTA3MX0.U-JCojYxejXYDOmYLSd6uZ_5Snx30U14O3K-_xI06Hg";
+
+const headers = {
+  "apikey": API_KEY,
+  "Authorization": `Bearer ${API_KEY}`
+};
+
+const map = L.map('map').setView([-1.5, -78.0], 6);
+document.getElementById("map").style.zIndex = "10";
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© OpenStreetMap contributors'
+}).addTo(map);
+
+let allFeatures = [];
+
+
+async function fetchAllData(max = 10000, chunk = 1000) {
+  let allData = [];
+  for (let offset = 0; offset < max; offset += chunk) {
+    const url = `https://ngwddojhwmvillngwmip.supabase.co/rest/v1/rua4326?select=*&offset=${offset}&limit=${chunk}`;
+    const response = await fetch(url, { headers });
+    const data = await response.json();
+    allData = allData.concat(data);
+    if (data.length < chunk) break;
+  }
+  return allData;
+}
+
+async function loadData() {
+  const data = await fetchAllData(10000);
+  allFeatures = data.filter(item => item.geom);
+  populateFilters(allFeatures);
+  updateMap(allFeatures);
+  renderChart(allFeatures);
+  renderTable(allFeatures);
+}
+
+function populateFilters(data) {
+  const provincias = [...new Set(data.map(i => i.provincia_).filter(Boolean))].sort();
+  fillSelect("provinciaFilter", provincias);
+  updateSelect("cantonFilter", [], "-- Cantón --");
+  updateSelect("usoFilter", [], "-- Uso del Agua --");
+}
+
+function fillSelect(id, values) {
+  const select = document.getElementById(id);
+  values.forEach(val => {
+    const option = document.createElement("option");
+    option.value = val;
+    option.textContent = val;
+    select.appendChild(option);
+  });
+}
+
+function updateSelect(id, values, placeholder) {
+  const select = document.getElementById(id);
+  select.innerHTML = `<option value="">${placeholder}</option>`;
+  values.forEach(val => {
+    const option = document.createElement("option");
+    option.value = val;
+    option.textContent = val;
+    select.appendChild(option);
+  });
+}
+
+
+
+
+
+function updateMap(features) {
+  if (window.layerGroup) window.layerGroup.clearLayers();
+  const usoColores = {
+    "CONSUMO HUMANO": "#1f77b4",
+    "RIEGO": "#2ca02c",
+    "PECUARIO": "#ff7f0e",
+    "INDUSTRIAL": "#d62728",
+    "RECREATIVO": "#9467bd",
+    "ACUICULTURA": "#17becf",
+    "ACUACULTURA": "#17becf",
+    "OTRO": "#8c564b",
+    "NO DEFINIDO": "#7f7f7f",
+    "ABREVADERO": "#e377c2"
+  };
+  const geojsonFeatures = features.map(item => {
+    let uso = (item.nom_uso_ap || "NO DEFINIDO").toUpperCase();
+if (uso.includes("RIEGO")) {
+  uso = "RIEGO";
+} else if (uso.includes("ACUICULTURA") || uso.includes("ACUACULTURA")) {
+  uso = "ACUICULTURA / ACUACULTURA";
+} else if (uso.includes("ABREVAD")) {
+  uso = "ABREVADERO";
+}
+    return {
+      type: "Feature",
+      geometry: item.geom,
+      properties: {
+        provincia: item.provincia_,
+        canton: item.canton_fue,
+        parroquia: item.parroquia_,
+        uso: uso,
+        volumen: item.volumen_ag,
+        caudal: item.caudal_aut,
+        usuario: item.nom_usuari,
+        nombre_fuente: item.nombre_fue,
+        tipo_fuente: item.tipo_fuent,
+        origen_fuente: item.origen_fue
+      }
+    };
+  });
+
+  window.layerGroup = L.geoJSON(geojsonFeatures, {
+    pointToLayer: function (feature, latlng) {
+      const color = usoColores[feature.properties.uso] || "#000000";
+      return L.circleMarker(latlng, {
+        radius: 6,
+        fillColor: color,
+        color: "#ffffff",
+        weight: 1,
+        opacity: 1,
+        fillOpacity: 0.8
+      });
+    },
+    onEachFeature: (feature, layer) => {
+      const p = feature.properties;
+      const popup = `<b>Provincia:</b> ${p.provincia}<br><b>Cantón:</b> ${p.canton}<br><b>Parroquia:</b> ${p.parroquia}<br><b>Uso:</b> ${p.uso}<br><b>Volumen:</b> ${p.volumen}<br><b>Caudal:</b> ${p.caudal}<br><b>Usuario:</b> ${p.usuario}<br><b>Nombre de la fuente:</b> ${p.nombre_fuente}<br><b>Tipo de fuente:</b> ${p.tipo_fuente}<br><b>Origen de fuente:</b> ${p.origen_fuente}`;
+      layer.bindPopup(popup);
+    }
+  }).addTo(map);
+}
+
+function applyFilters() {
+  const provincia = document.getElementById("provinciaFilter").value;
+  const canton = document.getElementById("cantonFilter").value;
+  const uso = document.getElementById("usoFilter").value;
+  let filtered = [...allFeatures];
+  if (provincia) filtered = filtered.filter(f => f.provincia_ === provincia);
+  if (canton) filtered = filtered.filter(f => f.canton_fue === canton);
+  if (uso) {
+    filtered = filtered.filter(f => {
+      const nom = (f.nom_uso_ap || "").toUpperCase();
+      if (uso === "RIEGO" && nom.includes("RIEGO")) return true;
+      if (uso === "ACUICULTURA / ACUACULTURA" && (nom.includes("ACUICULTURA") || nom.includes("ACUACULTURA"))) return true;
+      if (uso === "ABREVADERO" && nom.includes("ABREVAD")) return true;
+      return nom === uso;
+    });
+  }
+  updateMap(filtered);
+  renderChart(filtered);
+  
+  renderTable(filtered);
+
+  // Ajustar el zoom al área filtrada
+  if (filtered.length > 0) {
+    const coords = filtered.map(f => {
+      const g = f.geom;
+      return [g.coordinates[1], g.coordinates[0]]; // [lat, lon]
+    });
+    const bounds = L.latLngBounds(coords);
+    map.fitBounds(bounds, { padding: [20, 20] });
+  }
+
+}
+
+document.getElementById("provinciaFilter").addEventListener("change", () => {
+  const provincia = document.getElementById("provinciaFilter").value;
+  const filtered = allFeatures.filter(f => f.provincia_ === provincia);
+  const cantones = [...new Set(filtered.map(f => f.canton_fue).filter(Boolean))].sort();
+  updateSelect("cantonFilter", cantones, "-- Cantón --");
+  const usos = [...new Set(filtered.map(f => {
+    let uso = (f.nom_uso_ap || "").toUpperCase();
+    if (uso.includes("RIEGO")) return "RIEGO";
+    if (uso.includes("ACUICULTURA") || uso.includes("ACUACULTURA")) return "ACUICULTURA / ACUACULTURA";
+    if (uso.includes("ABREVAD")) return "ABREVADERO";
+    if (!uso || uso === "") return "NO DEFINIDO";
+    return uso;
+  }))].sort();
+  updateSelect("usoFilter", usos, "-- Uso del Agua --");
+  applyFilters();
+  
+  // Ajustar el zoom a registros filtrados por provincia
+  if (filtered.length > 0) {
+    const coords = filtered.map(f => {
+      const g = f.geom;
+      return [g.coordinates[1], g.coordinates[0]];
+    });
+    const bounds = L.latLngBounds(coords);
+    map.fitBounds(bounds, { padding: [20, 20] });
+  }
+
+});
+
+document.getElementById("cantonFilter").addEventListener("change", applyFilters);
+document.getElementById("usoFilter").addEventListener("change", applyFilters);
+loadData();
+
+function renderChart(data) {
+  const conteo = {};
+  data.forEach(f => {
+    let uso = (f.nom_uso_ap || "NO DEFINIDO").toUpperCase();
+    if (uso.includes("RIEGO")) {
+      uso = "RIEGO";
+    } else if (uso.includes("ACUICULTURA") || uso.includes("ACUACULTURA")) {
+      uso = "ACUICULTURA / ACUACULTURA";
+    } else if (uso.includes("ABREVAD")) {
+      uso = "ABREVADERO";
+    }
+    conteo[uso] = (conteo[uso] || 0) + 1;
+  });
+  const labels = Object.keys(conteo);
+  const valores = Object.values(conteo);
+  const ctx = document.getElementById('usoAguaChart').getContext('2d');
+  if (window.chartUsoAgua) window.chartUsoAgua.destroy();
+  window.chartUsoAgua = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'Cantidad de Registros',
+        data: valores,
+        backgroundColor: 'rgba(54, 162, 235, 0.6)'
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { display: false },
+        title: { display: false }
+      }
+    }
+  });
+}
+
+function renderTable(data) {
+  const tbody = document.getElementById("tablaBody");
+  tbody.innerHTML = "";
+  data.forEach(f => {
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td class="border px-2 py-1">${f.provincia_ || ""}</td>
+      <td class="border px-2 py-1">${f.canton_fue || ""}</td>
+      <td class="border px-2 py-1">${
+      (() => {
+        let uso = (f.nom_uso_ap || "").toUpperCase();
+        if (uso.includes("RIEGO")) return "RIEGO";
+        if (uso.includes("ACUICULTURA") || uso.includes("ACUACULTURA")) return "ACUICULTURA / ACUACULTURA";
+        if (uso.includes("ABREVAD")) return "ABREVADERO";
+        return uso || "NO DEFINIDO";
+      })()
+    }</td>
+      <td class="border px-2 py-1">${f.volumen_ag || ""}</td>
+      <td class="border px-2 py-1">${f.caudal_aut || ""}</td>
+    `;
+    tbody.appendChild(row);
+  });
+}
+</script>
+<!-- Botón flotante para abrir el formulario -->
+<button class="fixed bottom-6 right-6 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded shadow-lg z-[60] transition-transform duration-300 hover:scale-105 hover:animate-pulse" id="openModalBtn">Denuncia Afectación a los Recursos Hídricos</button>
+<button class="fixed top-6 right-6 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-full shadow-xl z-[60] transition duration-300 hover:scale-105" id="localizarBtn">
+  📍 Mi ubicación
+</button>
+<!-- Modal -->
+<div class="fixed inset-0 z-50 hidden" id="denunciaModal">
+<div class="flex items-center justify-center w-full h-full bg-black bg-opacity-50">
+<div class="relative bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6 overflow-auto max-h-[90vh] mx-4">
+<button class="absolute top-2 right-3 text-2xl font-bold text-gray-600 hover:text-gray-800" id="closeModalBtn">×</button>
+<h2 class="text-2xl font-bold mb-4 text-center">Formulario de denuncia de afectación a los Recursos Hídricos</h2>
+<form class="space-y-4 grid grid-cols-1 sm:grid-cols-2 gap-4" id="incidenteForm">
+<input class="border p-3 rounded-md shadow-sm focus:ring-2 focus:ring-blue-300 transition-all" id="nombreInput" placeholder="Nombre de quien reporta" required="" type="text"/>
+<input class="border p-3 rounded-md shadow-sm focus:ring-2 focus:ring-blue-300 transition-all" id="ciInput" placeholder="Cédula de Identidad" required="" type="text"/>
+<input class="border p-3 rounded-md shadow-sm focus:ring-2 focus:ring-blue-300 transition-all" id="emailInput" placeholder="Correo electrónico" required="" type="email"/>
+<select class="border p-3 rounded-md shadow-sm focus:ring-2 focus:ring-blue-300 transition-all" id="infraccionInput" required="">
+<option value="">-- Seleccione una infracción --</option>
+<option value="Captación sin autorización">Captación sin autorización</option>
+<option value="Contaminación del recurso hídrico">Contaminación del recurso hídrico</option>
+<option value="Alteración del caudal ecológico">Alteración del caudal ecológico</option>
+<option value="Construcción sin permiso">Construcción sin permiso</option>
+<option value="Derivación o desvío no autorizado">Derivación o desvío no autorizado</option>
+<option value="Uso no conforme al título habilitante">Uso no conforme al título habilitante</option>
+</select>
+<button class="col-span-1 sm:col-span-2 bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition w-full shadow-lg" type="submit">
+          Enviar Reporte
+        </button>
+<p class="text-center text-green-600 mt-2" id="mensajeEnvio"></p>
+</form>
+</div>
+</div>
+</div>
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  const openBtn = document.getElementById("openModalBtn");
+  const closeBtn = document.getElementById("closeModalBtn");
+  const modal = document.getElementById("denunciaModal");
+
+  openBtn.addEventListener("click", () => {
+    modal.classList.remove("hidden");
+    document.body.classList.add("overflow-hidden");
+  });
+
+  closeBtn.addEventListener("click", () => {
+    modal.classList.add("hidden");
+    document.body.classList.remove("overflow-hidden");
+  });
+
+  const REPORT_URL = "https://ngwddojhwmvillngwmip.supabase.co/rest/v1/reportes_incidentes";
+  const API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5nd2Rkb2pod212aWxsbmd3bWlwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTAyOTMwNzEsImV4cCI6MjA2NTg2OTA3MX0.U-JCojYxejXYDOmYLSd6uZ_5Snx30U14O3K-_xI06Hg";
+
+  const form = document.getElementById("incidenteForm");
+  form.addEventListener("submit", async function (e) {
+    e.preventDefault();
+    const nombre = document.getElementById("nombreInput").value;
+    const ci = document.getElementById("ciInput").value;
+    const email = document.getElementById("emailInput").value;
+    const infraccion = document.getElementById("infraccionInput").value;
+    const mensaje = document.getElementById("mensajeEnvio");
+
+    if (!navigator.geolocation) {
+      mensaje.textContent = "Geolocalización no soportada.";
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(async (position) => {
+      const lat = position.coords.latitude;
+      const lon = position.coords.longitude;
+
+      const insertData = {
+        nombre_reporta: nombre,
+        ci: ci,
+        email: email,
+        infraccion: infraccion,
+        posicion: `POINT(${lon} ${lat})`
+      };
+
+      const response = await fetch(REPORT_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: API_KEY,
+          Authorization: `Bearer ${API_KEY}`
+        },
+        body: JSON.stringify(insertData)
+      });
+
+      mensaje.textContent = response.ok ? "✅ Reporte enviado correctamente." : "❌ Error al enviar el reporte.";
+      if (response.ok) {
+        form.reset();
+        setTimeout(() => {
+          modal.classList.add("hidden");
+          document.body.classList.remove("overflow-hidden");
+        }, 2000);
+      }
+    }, () => mensaje.textContent = "❌ No se pudo obtener la ubicación.");
+  });
+});
+</script>
+<script>
+// Función para agregar marcador de ubicación
+function mostrarUbicacionUsuario() {
+  if (!navigator.geolocation) {
+    alert("Geolocalización no soportada por este navegador.");
+    return;
+  }
+  navigator.geolocation.getCurrentPosition((position) => {
+    const lat = position.coords.latitude;
+    const lon = position.coords.longitude;
+
+    if (window.userMarker) {
+      map.removeLayer(window.userMarker);
+    }
+
+    const customIcon = L.divIcon({
+  className: "custom-user-icon",
+  html: '<div style="width: 32px; height: 32px; background-color: gold; clip-path: polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%); border: 3px solid black; box-shadow: 0 0 10px rgba(0,0,0,0.5);"></div>',
+  iconSize: [32, 32],
+  iconAnchor: [16, 16],
+});
+
+    window.userMarker = L.marker([lat, lon], { icon: customIcon }).addTo(map);
+
+    window.userMarker.on("mouseover", function (e) {
+      const latlng = e.latlng;
+      const tooltipText = `📍 Coordenadas:<br>Lat: ${latlng.lat.toFixed(6)}<br>Lon: ${latlng.lng.toFixed(6)}`;
+      window.userMarker.bindTooltip(tooltipText, { permanent: false, direction: "top" }).openTooltip();
+    });
+
+    map.setView([lat, lon], 14);
+  }, () => {
+    alert("No se pudo obtener la ubicación.");
+  });
+}
+
+// Detectar automáticamente al cargar
+document.addEventListener("DOMContentLoaded", function () {
+  mostrarUbicacionUsuario();
+  const btn = document.getElementById("localizarBtn");
+  if (btn) {
+    btn.addEventListener("click", mostrarUbicacionUsuario);
+  }
+});
+</script>
+<div class="legend leaflet-bottom leaflet-left shadow-xl rounded-xl p-4 text-sm" id="leyenda-uso">
+<h4><strong>Usos del Agua</strong></h4>
+<i style="background: #1f77b4"></i> CONSUMO HUMANO<br/>
+<i style="background: #2ca02c"></i> RIEGO<br/>
+<i style="background: #ff7f0e"></i> PECUARIO<br/>
+<i style="background: #d62728"></i> INDUSTRIAL<br/>
+<i style="background: #9467bd"></i> RECREATIVO<br/>
+<i style="background: #17becf"></i> ACUICULTURA / ACUACULTURA<br/>
+<i style="background: #e377c2"></i> ABREVADERO<br/>
+<i style="background: #8c564b"></i> OTRO<br/>
+<i style="background: #7f7f7f"></i> NO DEFINIDO<br/>
+</div>
+<script>
+document.getElementById("exportCsvBtn").addEventListener("click", function () {
+  const table = document.getElementById("tablaResultados");
+  let csv = [];
+  for (let row of table.rows) {
+    let rowData = [];
+    for (let cell of row.cells) {
+      let text = cell.innerText.replace(/"/g, '""');  // Escape comillas dobles
+      rowData.push(`"${text}"`);
+    }
+    csv.push(rowData.join(","));
+  }
+  const csvContent = csv.join("\n");
+  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.setAttribute("href", url);
+  link.setAttribute("download", "registros_filtrados.csv");
+  link.style.visibility = "hidden";
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+});
+</script>
+<script>
+document.getElementById("resetFiltersBtn").addEventListener("click", () => {
+  document.getElementById("provinciaFilter").value = "";
+  updateSelect("cantonFilter", [], "-- Cantón --");
+  updateSelect("usoFilter", [], "-- Uso del Agua --");
+  updateMap(allFeatures);
+  renderChart(allFeatures);
+  renderTable(allFeatures);
+  // Resetear el mapa al centro original sin zoom
+  map.setView([-1.5, -78.0], 6);
+});
+</script>
+</body>
+</html>
